@@ -9,58 +9,65 @@ It's the research side of [FIVES](https://github.com/yagiht/fives), a webcam han
 that replaces the mouse with gestures. FIVES tracks the hand at ~28 fps with ~21 ms of processing, so the
 cursor always shows where the finger *was*. A prediction model is one way to close that gap.
 
-> Status: **in progress.** The current best model is close to, but not yet better than, a simple
-> constant-velocity baseline. Results below are reported honestly on held-out data.
+> **Status:** a small CNN beats a damped-velocity baseline by **15%**, winning all 6 cross-validation folds
+> and a held-out test set. It isn't in FIVES yet: FIVES ships the simpler damped-velocity "lead" for now,
+> and the CNN goes in once there's more (and more varied) training data, since it's still improving as data grows.
 
 ## How it works
 
-<img width="1902" height="1458" alt="Adobe Express - Screen Recording 2026-10-30 at 12 14 29 AM" src="https://github.com/user-attachments/assets/4868186a-1620-4f1c-b391-255800c651a4" />
-
+<img width="1902" height="1458" alt="Adobe Express - Screen Recording 2026-10-30 at 12 14 29 AM" src="https://github.com/user-attachments/assets/4868186a-1620-4f1c-b391-255800c651a4" />
 
 ```
-webcam ─► MediaPipe (21 hand points) ─► fingertip track ─► last 8 frames ─► model ─► position 2 frames (~60 ms) ahead
+webcam ─► MediaPipe (21 hand points) ─► fingertip, knuckle, wrist ─► last 8 frames ─► model ─► fingertip 2 frames (~60 ms) ahead
 ```
 
-1. **Collect data with a game.** `game.py` pops up small "windows" to close by hovering a fingertip
-   over them, a mix of long fast moves and small precise ones. Every game records the raw MediaPipe
-   hand landmarks (positions only, no images) to `data/`, and logs the average close time to
-   `runs/scores.csv` as a usability benchmark.
-2. **Build examples.** Each example is the fingertip's last 8 positions (16 numbers) and the answer is
-   where it actually was 2 frames later. Frames where tracking was lost (NaN) are skipped.
-3. **Train and evaluate** on a time-based split: first 80% of a session for training, last 20% for
-   testing, so the model is always scored on movement it has never seen.
-4. **Compare against baselines** that need no learning:
-   - *no prediction*: "the finger stays where it is" (what a plain cursor does today)
-   - *constant velocity*: "the finger keeps moving at its current speed"
+1. **Collect data with a game.** `game.py` is a target-acquisition game: lock the reticle onto targets as fast as
+   you can. It has player accounts, a score and timer, and a leaderboard, so friends can contribute data.
+   Every game records the raw MediaPipe hand landmarks (positions only, no images), the targets, and who played.
+2. **Clean it.** Frames where tracking was lost, or that break two physical rules (a one-frame "spike" out and
+   back, or the fingertip jumping farther from its knuckle than a finger is long), are left out.
+3. **Train and evaluate fairly:** cross-validation across whole games, early stopping on held-out
+   validation games, and a final "lockbox" of games no model saw during development.
+4. **Compare against baselines that need no learning**, including the strongest one found: *damped velocity*
+   (the last move × one fitted number).
 
-The game's cursor uses the same pipeline as FIVES: One Euro filtering, a glitch guard against one-frame
-tracking jumps, a PRISM-style precision pointer (slow hand = scaled-down motion, fast hand = 1:1), and
-interpolation between camera frames. Only the on-screen dot is filtered; the recordings stay raw.
+## Results
 
-## Results so far
+Error = average distance between the predicted and actual fingertip, in screen pixels (1512 px wide).
+36 games for cross-validation (6 folds), plus 5 untouched lockbox games.
 
-One session (~1 minute, 1,776 examples; 1,420 train / 356 test). Error = average distance between the
-predicted and actual fingertip, in screen pixels (1512 px wide), **on the held-out test set**:
+| Predictor | 6-fold CV | Lockbox |
+|---|---|---|
+| Damped velocity (baseline) | 20.44 px | 30.40 px |
+| MLP, fingertip only, dropout | 18.67 px | 27.02 px |
+| **CNN, fingertip + knuckle + wrist, dropout** | **17.46 px** | **25.76 px** |
 
-| Predictor | Test error |
-|---|---|
-| No prediction | 26.8 px |
-| **Constant velocity (baseline to beat)** | **15.8 px** |
-| Linear model, raw positions | 27.7 px |
-| Linear model, normalized inputs | 17.3 px |
-| MLP (16→64→64→2, ReLU) | 22.9 px |
+The CNN beat the MLP in all 6 folds. The lockbox games were faster (harder) than earlier ones, but the ranking held.
+The final model and its training recipe are in [`best_model.py`](best_model.py).
 
-What I learned:
-- **Normalization mattered most.** Raw positions (~0.5) hide the useful signal, the tiny frame-to-frame
-  movements (~0.02). Making every input relative to the current position and scaling ×10 cut the linear
-  model's error from 27.7 to 17.3 px with no other change.
-- **The bigger model overfit.** The MLP reached a much lower training loss (0.0034 vs 0.027) but did
-  worse on the test set. With one minute of data, it memorized that session.
-- **A low loss can hide a bad model.** On synthetic data, plain SGD reached a tiny loss while the
-  motion weights were only half learned (they get ~10× smaller gradients); Adam fixed it.
+## What I found along the way
 
-**Next:** record 10–15 sessions, filter tracking glitches (teleports > 15% of the frame), retrain, and
-test whether the model beats constant velocity, both in pixels and in real game times (`--model`).
+The model took two days of experiments (`lessons/`). The path mattered more than the final number:
+
+- **Noise isn't the problem.** Holding a finger still, MediaPipe's jitter is only ~1 px, so almost all of the
+  error is real movement the model didn't see coming (lesson 10).
+- **Tracker glitches hid a lot of error.** 5% of examples touched a glitch frame and held 17% of all error.
+  A physics-based filter (spikes, fingertip-to-knuckle distance) fixed that (lessons 11-13).
+- **My first "win" was mostly fake.** On clean data, the early MLP was basically damped velocity in disguise.
+  It had looked better only because glitches threw off the baseline's fit (lesson 13).
+- **The hand helps on turns.** Adding knuckle and wrist made turns and speed-ups ~10% better but steady
+  movement worse (lesson 14). A mixture-of-experts gate learned *on its own* to trust the hand more during turns
+  (lesson 15).
+- **A transformer rediscovered damped velocity.** Its attention weights showed it looking almost only at the
+  previous frame, in every situation. Not enough data for attention to find more (lesson 18).
+- **Mirroring is free data.** Flipping recordings left ↔ right was worth about as much as doubling the games (lesson 19).
+- **Three folds can lie.** A combination that looked best on 3 folds fell apart on 6 (lesson 20).
+- **The CNN was never bad; its training was.** Training curves showed the learning rate was too high (jumpy) and the
+  model memorized games after a few hundred steps. A calmer learning rate plus dropout fixed both, and the CNN
+  went from tied with damped velocity to 15% better (lessons 22-25).
+- **More data still helps.** The learning curve is still dropping at 27 training games (lesson 26).
+
+Applied to FIVES: the damped-velocity "lead" from these baselines is already shipped there, and you can feel the lag drop.
 
 ## Run it
 
@@ -73,30 +80,36 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-python game.py                  # play: point at the windows, hover to close (q quits)
-python train.py                 # train on everything in data/
-python game.py --model --seed 1 # play with the trained model steering
-python game.py --seed 1         # same windows without it, to compare
+python game.py                       # sign in or make a player, then play (q quits a game early)
+python lessons/lesson25.py           # the full comparison: 6-fold CV + lockbox (data_final/)
+python best_model.py                 # print the winning model
 ```
 
-`python game.py --help` lists the cursor options (`--raw`, `--no-glide`, `--no-precise`, `--margin`, …).
-On macOS, allow your terminal to use the camera the first time.
+The menu (bottom right) switches the color theme and the next-target preview. On macOS, allow your terminal to
+use the camera the first time. Recordings go to `data/` and player accounts to `runs/`; neither is uploaded.
 
 ## Files
 
 | File | What it does |
 |---|---|
-| `game.py` | data-collection game and benchmark |
+| `game.py` | the data-collection game: targets, scope-style cursor, score, timer |
+| `arcade.py` | menus, player accounts (passcodes stored scrambled), leaderboard, themes |
+| `best_model.py` | the winning model and its training recipe, on its own |
 | `common.py` | camera, MediaPipe setup, shared settings |
-| `features.py` | turns recordings into training examples |
-| `model.py` | the prediction network |
-| `train.py` | training and evaluation against the baselines |
-| `fake_data.py` | synthetic recordings for testing the pipeline without a camera |
-| `lessons/` | my step-by-step PyTorch learning scripts, from tensors to the experiments above |
+| `features.py`, `model.py`, `train.py` | the original training pipeline (used by `game.py --model`) |
+| `fake_data.py` | synthetic recordings for testing without a camera |
+| `lessons/` | the experiments, in order (see below) |
+
+**Lessons:** 1-5 PyTorch basics · 6-9 cross-validation, overfitting, baselines · 10 noise floor · 11-13 error
+breakdown and glitch filter · 14-15 hand points and mixture of experts · 16-17 CNNs · 18 transformer and attention ·
+19 learning curve and mirroring · 20-21 inputs and loss functions · 22-24 debugging training · 25 final comparison ·
+26 learning curve for the final model.
 
 ## How this was built
 
-I built this while learning PyTorch, with help from Claude (Anthropic's AI). The game and the training
-pipeline (`game.py`, `common.py`, `features.py`, `model.py`, `train.py`) were written with Claude. The
-`lessons/` scripts and the experiments in the results table are my own work, written step by step while
-learning: tensors, training loops, batching, normalization, and diagnosing overfitting.
+I built this while learning PyTorch, with help from Claude (Anthropic's AI). Lessons 1-5 are my own, written
+step by step while learning tensors, training loops, and normalization. The game, the arcade, and the code for
+lessons 6-26 were written by Claude at my direction. I chose which questions to test, ran every experiment,
+read the results, and decided what to try next (for example, suspecting that the worst errors were small tracker
+glitches, noticing that the game measured reacting rather than planning, which led to the next-target preview,
+and asking whether the model could be strict only on fast moves).

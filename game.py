@@ -8,12 +8,15 @@
     python game.py --margin 0.15   # how much of the picture maps to the window (FIVES CURSOR_MARGIN)
     python game.py --no-glide      # the dot jumps once per camera frame instead of sliding
 
+It opens on the arcade menu (arcade.py): sign in or make a player, then press START. Every game has a score,
+a timer, and goes on the leaderboard with your attempt number.
+
 How to play: point with your index finger. Little windows pop up; hover the dot
-over one until its ring fills to close it. Small windows test precision, far ones
+over one until its ring fills to close it (drifting off drains the ring slowly). Small windows test precision, far ones
 test speed. Every game saves your hand movement to data/ (training data) and your
 average time to runs/scores.csv (the benchmark).
 
-Keys in the game window: q = quit early (still saves).
+Keys in the game window: q = quit early (still saves your hand data, but isn't put on the leaderboard).
 
 Each recording (data/session_*.npz) holds:
   t, pts           camera time and the 21 raw hand points of every frame (NaN = no hand)
@@ -22,7 +25,7 @@ Each recording (data/session_*.npz) holds:
   target_cam       the same windows in camera units (x0, y0, x1, y1), so they line up with pts
   target_spawn_t   camera time each window appeared
   target_close_t   camera time it was closed (NaN = never closed)
-  meta             game settings (window size, margin, dwell, ...) as JSON text
+  meta             game settings (window size, margin, dwell, ...) and the player, as JSON text
 
 The dot you SEE is smoothed (One Euro filter, like FIVES) and ignores one-frame glitches.
 What gets RECORDED is always the raw MediaPipe points, so your training data stays honest.
@@ -40,15 +43,25 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
+import arcade as A
 import common as C
 import features as F
 
 W, H = 960, 720
+WIN = "crosshair"
+TOP = 80              # the score bar covers the top, so windows start below it
+COUNTDOWN = 3         # seconds of 3-2-1 before the timer starts
 DWELL = 0.30          # seconds to hover a window to close it
-BG = (18, 12, 8)
-BLUE = (255, 170, 60)
-WHITE = (235, 235, 235)
-DIM = (110, 90, 70)
+DRAIN = 0.60          # off the target, the lock-on ring drains over this long (instead of resetting at once)
+STICKY = 8            # once you're locking on, the target counts as this many pixels bigger on every side
+# OpenCV colors are (blue, green, red): the same tactical look as the menu.
+# AMBER is the theme's accent color; play() sets it from the menu's theme at the start of every game.
+BG = (12, 9, 7)
+AMBER = (64, 64, 255)
+WHITE = (234, 225, 216)
+DIM = (90, 75, 62)
+PANEL = (21, 16, 12)
+BLUE = AMBER          # (old name, still used by the model's faint dot)
 
 
 class OneEuro:
@@ -150,22 +163,56 @@ def new_target(rng, last):
     small = rng.random() < 1 / 3
     w, h = (34, 26) if small else (90, 66)
     while True:
-        x, y = rng.randint(40, W - 40 - w), rng.randint(90, H - 40 - h)
+        x, y = rng.randint(40, W - 40 - w), rng.randint(TOP + 20, H - 40 - h)
         if last is None or np.hypot(x - last[0], y - last[1]) > 180:
             return (x, y, w, h)
 
 
-def draw_window(img, rect, fill):
+def make_backdrop():
+    """The game's background: the menu's grid and scanlines (drawn once, copied every frame)."""
+    return cv2.cvtColor(np.asarray(A.backdrop(W, H)), cv2.COLOR_RGB2BGR)
+
+
+def draw_target(img, rect, fill, number, color=None):
+    """A target: corner brackets that close in while you lock on, a lock-on ring, and a label.
+    color: used to draw the faint NEXT preview (no label)."""
     x, y, w, h = rect
-    cv2.rectangle(img, (x, y), (x + w, y + h), (60, 40, 25), -1)
-    cv2.rectangle(img, (x, y), (x + w, y + 9), BLUE, -1)                    # title bar
-    cv2.rectangle(img, (x, y), (x + w, y + h), BLUE, 1)
-    s = min(w, h) // 5
-    cx, cy = x + w // 2, y + 5 + h // 2
-    cv2.line(img, (cx - s, cy - s), (cx + s, cy + s), WHITE, 2)             # the X
-    cv2.line(img, (cx - s, cy + s), (cx + s, cy - s), WHITE, 2)
+    cx, cy = x + w // 2, y + h // 2
+    aa = cv2.LINE_AA
+    cv2.rectangle(img, (x, y), (x + w, y + h), PANEL, -1)
+    faint = color is not None
+    color = color or (AMBER if fill > 0 else WHITE)
+    o = int(10 * (1 - fill))                            # brackets start a bit outside and close in
+    L = max(7, min(w, h) // 3)
+    for bx, by, dx, dy in ((x - o, y - o, 1, 1), (x + w + o, y - o, -1, 1),
+                           (x - o, y + h + o, 1, -1), (x + w + o, y + h + o, -1, -1)):
+        cv2.line(img, (bx, by), (bx + dx * L, by), color, 2, aa)
+        cv2.line(img, (bx, by), (bx, by + dy * L), color, 2, aa)
+    s = 4 if w < 60 else 6                              # small diamond in the middle
+    cv2.polylines(img, [np.array([(cx, cy - s), (cx + s, cy), (cx, cy + s), (cx - s, cy)])], True, color, 1, aa)
     if fill > 0:
-        cv2.ellipse(img, (cx, cy), (s + 8, s + 8), -90, 0, int(360 * fill), WHITE, 2)
+        r = max(w, h) // 2 + 14
+        cv2.ellipse(img, (cx, cy), (r, r), -90, 0, int(360 * fill), AMBER, 2, aa)
+    if faint:                                           # the NEXT preview: no label
+        return
+    tag = f"T-{number:02d}" + ("  x1.5" if w < 60 else "")
+    cv2.putText(img, tag, (x - o, y - o - 6), cv2.FONT_HERSHEY_PLAIN, 0.9, DIM if fill == 0 else AMBER, 1, aa)
+
+
+def draw_preview(img, rect, number):
+    """The NEXT target: the same target, drawn in a faint version of the theme color, so you can plan."""
+    faint = tuple(int(a * 0.38 + b * 0.62) for a, b in zip(AMBER, BG))
+    draw_target(img, rect, 0.0, number, color=faint)
+
+
+def draw_reticle(img, p, hot):
+    """Your cursor: a scope reticle. Amber when it's on a target."""
+    color = AMBER if hot else WHITE
+    aa = cv2.LINE_AA
+    cv2.circle(img, p, 15, color, 1, aa)
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        cv2.line(img, (p[0] + dx * 6, p[1] + dy * 6), (p[0] + dx * 24, p[1] + dy * 24), color, 1, aa)
+    cv2.circle(img, p, 2, color, -1, aa)
 
 
 def main():
@@ -194,141 +241,201 @@ def main():
         torch.set_num_threads(1)
         print(f"Using {path.name} (test error {info['test_error']:.4f})")
 
-    smoother = None if args.raw else OneEuro(args.cutoff, args.beta)
     C.MARGIN = args.margin                      # same mapping as FIVES' CURSOR_MARGIN
-    accel = None if args.no_precise else PrismPointer(args.precise_speed, args.min_scale, 0.9, C.MARGIN, 1 - C.MARGIN)
-    last_raw = None                             # last good raw fingertip, for spotting glitches
-    glitches = held = 0
-    rng = random.Random(args.seed)
     landmarker = C.make_landmarker()
     cam = C.Camera()
-    times, frames, cursors = [], [], []         # the recording (hand points + where the dot was)
-    targets = []                                # every window: rect, when it appeared, when it closed
-    shown = None                                # where the dot was last drawn (window pixels), for gliding
-    GLIDE_STEPS = 3                             # in-between pictures per camera frame
-    recent = deque(maxlen=F.HISTORY)            # (t, signal) for the model
-    target, last_target = None, None
-    spawned = hover_since = None
-    close_times = []
-    seq, last_ms = 0, -1
-    fps, last = 0.0, time.monotonic()
-    cv2.namedWindow("cursor lab", cv2.WINDOW_AUTOSIZE)
-    print("Point at the windows to close them. q quits.")
-
+    cv2.namedWindow(WIN, cv2.WINDOW_AUTOSIZE)
+    players = A.Players()
+    menu = A.Menu(WIN, W, H, players, args.windows)
+    clock = {"last_ms": -1, "seq": 0}           # MediaPipe needs timestamps that only go up, across games
+    last_run = None
     try:
-        while len(close_times) < args.windows:
-            frame, stamp, seq = cam.read(seq)
-            if frame is None:
-                continue
-            frame = cv2.flip(frame, 1)          # mirror, so moving right moves the dot right
-            ms = max(int(stamp * 1000), last_ms + 1)
-            last_ms = ms
-            image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            result = landmarker.detect_for_video(image, ms)
-
-            canvas = np.full((H, W, 3), BG, np.uint8)
-            pointer = None
-            if result.hand_landmarks:
-                pts = np.array([(lm.x, lm.y) for lm in result.hand_landmarks[0]], np.float32)
-                times.append(stamp)
-                frames.append(pts)
-                sig = F.signal(pts[None])[0]
-                if recent and stamp - recent[-1][0] > F.MAX_GAP:
-                    recent.clear()
-                recent.append((stamp, sig))
-                tip = pts[C.INDEX_TIP]
-                if smoother is not None:        # glitch guard: only for the dot you see
-                    jumped = last_raw is not None and np.abs(tip - last_raw).max() > GLITCH_JUMP
-                    if jumped and held < 2:     # a teleport: hold the dot still for up to 2 frames
-                        glitches += 1
-                        held += 1
-                        tip = last_raw
-                    else:                       # normal (or it stayed there: it was real, follow it)
-                        last_raw, held = tip, 0
-                aim = tip                       # where the dot should go before smoothing
-                if predictor is not None:
-                    cv2.circle(canvas, C.to_window(tip, W, H), 5, DIM, -1)     # faint: raw finger
-                    if len(recent) == F.HISTORY:
-                        wt = np.array([r[0] for r in recent])
-                        ws = np.array([r[1] for r in recent])
-                        x = torch.from_numpy(F.window_features(wt, ws)[None])
-                        with torch.no_grad():
-                            aim = tip + predictor(x)[0].numpy()
-                pointer = aim if smoother is None else smoother.update(aim, stamp)
-                if accel is not None:           # slow hand = precise, fast hand = pinned (like FIVES)
-                    off = accel.update(pointer, stamp)
-                    pointer = np.array([pointer[0] + off[0], pointer[1] + off[1]], np.float32)
-            else:
-                times.append(stamp)
-                frames.append(np.full((21, 2), np.nan, np.float32))
-                recent.clear()
-                if smoother is not None:
-                    smoother.reset()                    # hand lost: start fresh when it comes back
-                last_raw, held = None, 0
-                if accel is not None:
-                    accel.hand_gone()                   # bring your hand back: the dot is under your finger again
-
-            cursors.append(np.array(pointer, np.float32) if pointer is not None else np.full(2, np.nan, np.float32))
-            now = time.monotonic()
-            if target is None:
-                target, spawned, hover_since = new_target(rng, last_target), now, None
-                targets.append({"rect": target, "spawn_t": stamp, "close_t": float("nan")})
-            fill = 0.0
-            if pointer is not None:
-                px, py = C.to_window(pointer, W, H)
-                x, y, w, h = target
-                if x <= px <= x + w and y <= py <= y + h:
-                    hover_since = hover_since or now
-                    fill = (now - hover_since) / DWELL
-                    if fill >= 1:
-                        close_times.append(now - spawned)
-                        targets[-1]["close_t"] = stamp
-                        last_target, target = target, None
-                        fill = 0.0
-                else:
-                    hover_since = None
-            if target is not None:
-                draw_window(canvas, target, fill)
-
-            fps = 0.9 * fps + 0.1 / max(now - last, 1e-6)
-            last = now
-            avg = np.mean(close_times) if close_times else 0
-            mode = (("MODEL" if predictor is not None else "PLAIN") + ("  RAW" if args.raw else "")
-                    + ("" if accel is None else "  PRECISE"))
-            cv2.putText(canvas, f"{mode}   closed {len(close_times)}/{args.windows}   avg {avg:.2f}s   "
-                        f"{fps:.0f} fps{'' if pointer is not None else '   NO HAND'}",
-                        (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, WHITE, 2)
-            # Glide (like FIVES): slide the dot to the new spot in a few small steps instead of one jump.
-            # Hovering/closing still uses the real spot, decided above.
-            quit_now = False
-            if pointer is None:
-                shown, steps = None, [None]
-            elif shown is None or args.no_glide:
-                steps = [(px, py)]
-            else:
-                steps = [(int(shown[0] + (px - shown[0]) * k / GLIDE_STEPS),
-                          int(shown[1] + (py - shown[1]) * k / GLIDE_STEPS)) for k in range(1, GLIDE_STEPS + 1)]
-            for i, spot in enumerate(steps):
-                img = canvas.copy() if len(steps) > 1 else canvas
-                if spot is not None:
-                    cv2.circle(img, spot, 9, BLUE, 2)
-                    cv2.circle(img, spot, 3, WHITE, -1)
-                cv2.imshow("cursor lab", img)
-                if cv2.waitKey(1 if i == len(steps) - 1 else 6) & 0xFF == ord("q"):
-                    quit_now = True
-                    break
-            if pointer is not None:
-                shown = (px, py)
-            if quit_now:
+        while True:
+            action, player = menu.run(last_run)
+            if action != "play":
+                break
+            attempt = players.next_attempt(player)
+            game = play(args, cam, landmarker, predictor, clock, players.name(player), attempt)
+            last_run = finish(args, game, predictor, player, players.name(player), attempt)
+            if game["window_closed"]:
                 break
     finally:
         cam.close()
         cv2.destroyAllWindows()
         landmarker.close()
 
-    mode = ("model" if predictor is not None else "plain") + ("_raw" if args.raw else "") + ("" if accel is None else "_precise")
-    if glitches:
-        print(f"Ignored {glitches} glitchy frames on screen (they're still in the recording, raw)")
+
+def play(args, cam, landmarker, predictor, clock, name, attempt):
+    """One game. Returns everything recorded plus the score."""
+    global AMBER, BLUE
+    AMBER = BLUE = tuple(int(v) for v in A.ACCENT[::-1])       # the theme color, RGB -> BGR
+    if predictor is not None:
+        import torch
+    smoother = None if args.raw else OneEuro(args.cutoff, args.beta)
+    accel = None if args.no_precise else PrismPointer(args.precise_speed, args.min_scale, 0.9, C.MARGIN, 1 - C.MARGIN)
+    last_raw = None                             # last good raw fingertip, for spotting glitches
+    glitches = held = 0
+    rng = random.Random(args.seed)
+    times, frames, cursors = [], [], []         # the recording (hand points + where the dot was)
+    targets = []                                # every window: rect, when it appeared, when it closed
+    shown = None                                # where the dot was last drawn (window pixels), for gliding
+    GLIDE_STEPS = 3                             # in-between pictures per camera frame
+    recent = deque(maxlen=F.HISTORY)            # (t, signal) for the model
+    target, last_target = None, None
+    spawned = None
+    lock = 0.0                                  # lock-on progress for the current target, 0..1
+    last_frame = time.monotonic()
+    preview = A.preview                         # show the NEXT target faintly, so you can plan your move
+    upcoming = None                             # that next target
+    close_times = []
+    score, popups = 0, []                       # popups: (x, y, points, when) for the "+667" that floats up
+    hand_since = None                           # when the hand showed up (starts the countdown)
+    started = finished_at = None                # timer: from the end of the countdown to the last window
+    quit_early = window_closed = False
+    backdrop = make_backdrop()
+    print(f"{name}, attempt #{attempt}: point at the windows to close them. q quits.")
+
+    while len(close_times) < args.windows:
+        frame, stamp, clock["seq"] = cam.read(clock["seq"])
+        if frame is None:
+            continue
+        frame = cv2.flip(frame, 1)              # mirror, so moving right moves the dot right
+        ms = max(int(stamp * 1000), clock["last_ms"] + 1)
+        clock["last_ms"] = ms
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        result = landmarker.detect_for_video(image, ms)
+
+        canvas = backdrop.copy()
+        pointer = None
+        if result.hand_landmarks:
+            pts = np.array([(lm.x, lm.y) for lm in result.hand_landmarks[0]], np.float32)
+            times.append(stamp)
+            frames.append(pts)
+            sig = F.signal(pts[None])[0]
+            if recent and stamp - recent[-1][0] > F.MAX_GAP:
+                recent.clear()
+            recent.append((stamp, sig))
+            tip = pts[C.INDEX_TIP]
+            if smoother is not None:            # glitch guard: only for the dot you see
+                jumped = last_raw is not None and np.abs(tip - last_raw).max() > GLITCH_JUMP
+                if jumped and held < 2:         # a teleport: hold the dot still for up to 2 frames
+                    glitches += 1
+                    held += 1
+                    tip = last_raw
+                else:                           # normal (or it stayed there: it was real, follow it)
+                    last_raw, held = tip, 0
+            aim = tip                           # where the dot should go before smoothing
+            if predictor is not None:
+                cv2.circle(canvas, C.to_window(tip, W, H), 5, DIM, -1)     # faint: raw finger
+                if len(recent) == F.HISTORY:
+                    wt = np.array([r[0] for r in recent])
+                    ws = np.array([r[1] for r in recent])
+                    x = torch.from_numpy(F.window_features(wt, ws)[None])
+                    with torch.no_grad():
+                        aim = tip + predictor(x)[0].numpy()
+            pointer = aim if smoother is None else smoother.update(aim, stamp)
+            if accel is not None:               # slow hand = precise, fast hand = pinned (like FIVES)
+                off = accel.update(pointer, stamp)
+                pointer = np.array([pointer[0] + off[0], pointer[1] + off[1]], np.float32)
+        else:
+            times.append(stamp)
+            frames.append(np.full((21, 2), np.nan, np.float32))
+            recent.clear()
+            if smoother is not None:
+                smoother.reset()                # hand lost: start fresh when it comes back
+            last_raw, held = None, 0
+            if accel is not None:
+                accel.hand_gone()               # bring your hand back: the dot is under your finger again
+
+        cursors.append(np.array(pointer, np.float32) if pointer is not None else np.full(2, np.nan, np.float32))
+        now = time.monotonic()
+
+        # Before the timer: wait for a hand, then count down 3-2-1.
+        if started is None:
+            if pointer is not None and hand_since is None:
+                hand_since = now
+            if hand_since is not None and now - hand_since >= COUNTDOWN:
+                started = now
+        if started is not None and target is None:
+            target, spawned, lock = upcoming or new_target(rng, last_target), now, 0.0
+            upcoming = new_target(rng, target) if preview and len(close_times) + 1 < args.windows else None
+            targets.append({"rect": target, "spawn_t": stamp, "close_t": float("nan")})
+        dt = min(now - last_frame, 0.1)                 # time since the last frame (capped, in case of a hiccup)
+        last_frame = now
+        on_target = False
+        if pointer is not None:
+            px, py = C.to_window(pointer, W, H)
+        if target is not None:
+            x, y, w, h = target
+            grow = STICKY if lock > 0 else 0            # sticky edges: harder to leave than to enter
+            inside = (pointer is not None and x - grow <= px <= x + w + grow and y - grow <= py <= y + h + grow)
+            if inside:
+                on_target = True
+                lock += dt / DWELL
+                if lock >= 1:
+                    took = now - spawned
+                    close_times.append(took)
+                    targets[-1]["close_t"] = stamp
+                    pts_won = A.window_points(took, small=w < 60)
+                    score += pts_won
+                    popups.append((x + w // 2, y + h // 2, pts_won, now))
+                    last_target, target = target, None
+                    lock = 0.0
+            else:
+                lock = max(0.0, lock - dt / DRAIN)      # drifted off: drain slowly instead of resetting
+        if upcoming is not None and target is not None:
+            draw_preview(canvas, upcoming, len(close_times) + 2)
+        if target is not None:
+            draw_target(canvas, target, min(lock, 1.0), len(close_times) + 1)
+
+        elapsed = 0.0 if started is None else now - started
+        A.draw_hud(canvas, name, attempt, score, elapsed, len(close_times), args.windows, popups, now)
+        popups = [p for p in popups if now - p[3] < 0.7]
+        if started is None:
+            if hand_since is None:
+                A.draw_big_message(canvas, "ACQUIRING HAND", "hold your index finger up in front of the camera")
+            else:
+                A.draw_big_message(canvas, str(COUNTDOWN - int(now - hand_since)), "HAND LOCKED · GET READY")
+        if pointer is None and started is not None:
+            cv2.putText(canvas, "SIGNAL LOST", (W // 2 - 70, H - 30), cv2.FONT_HERSHEY_PLAIN, 1.4, AMBER, 1, cv2.LINE_AA)
+
+        # Glide (like FIVES): slide the dot to the new spot in a few small steps instead of one jump.
+        # Hovering/closing still uses the real spot, decided above.
+        if pointer is None:
+            shown, steps = None, [None]
+        elif shown is None or args.no_glide:
+            steps = [(px, py)]
+        else:
+            steps = [(int(shown[0] + (px - shown[0]) * k / GLIDE_STEPS),
+                      int(shown[1] + (py - shown[1]) * k / GLIDE_STEPS)) for k in range(1, GLIDE_STEPS + 1)]
+        for i, spot in enumerate(steps):
+            img = canvas.copy() if len(steps) > 1 else canvas
+            if spot is not None:
+                draw_reticle(img, spot, on_target)
+            cv2.imshow(WIN, A.glow(img))
+            if cv2.waitKey(1 if i == len(steps) - 1 else 6) & 0xFF == ord("q"):
+                quit_early = True
+                break
+        if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
+            quit_early = window_closed = True
+        if pointer is not None:
+            shown = (px, py)
+        if quit_early:
+            break
+    finished_at = time.monotonic()
+
+    return {"times": times, "frames": frames, "cursors": cursors, "targets": targets, "glitches": glitches,
+            "close_times": close_times, "score": score, "accel": accel is not None, "preview": preview,
+            "time": 0.0 if started is None else finished_at - started,
+            "finished": len(close_times) >= args.windows, "window_closed": window_closed}
+
+
+def finish(args, game, predictor, player, name, attempt):
+    """Save the recording, the benchmark line, and the leaderboard entry. Returns the leaderboard entry."""
+    times, targets, close_times = game["times"], game["targets"], game["close_times"]
+    mode = ("model" if predictor is not None else "plain") + ("_raw" if args.raw else "") + ("_precise" if game["accel"] else "")
+    if game["glitches"]:
+        print(f"Ignored {game['glitches']} glitchy frames on screen (they're still in the recording, raw)")
     stamp_name = time.strftime("%Y%m%d_%H%M%S")
     if len(times) > 30:
         C.DATA_DIR.mkdir(exist_ok=True)
@@ -338,18 +445,20 @@ def main():
         rects = np.array([tg["rect"] for tg in targets], np.float32).reshape(-1, 4)
         cam = np.array([(to_cam(x, W), to_cam(y, H), to_cam(x + w, W), to_cam(y + h, H))
                         for x, y, w, h in rects], np.float32).reshape(-1, 4)
-        meta = {"window_w": W, "window_h": H, "margin": C.MARGIN, "dwell": DWELL, "precise": accel is not None,
+        meta = {"window_w": W, "window_h": H, "margin": C.MARGIN, "dwell": DWELL, "precise": game["accel"],
                 "min_scale": args.min_scale, "precise_speed": args.precise_speed, "raw": args.raw,
-                "glide": not args.no_glide, "seed": args.seed, "model": predictor is not None}
-        np.savez_compressed(out, t=np.array(times), pts=np.array(frames), cursor=np.array(cursors),
+                "glide": not args.no_glide, "seed": args.seed, "model": predictor is not None,
+                "player": player, "attempt": attempt, "score": game["score"], "finished": game["finished"],
+                "preview": game["preview"], "drain": DRAIN, "sticky": STICKY}
+        np.savez_compressed(out, t=np.array(times), pts=np.array(game["frames"]), cursor=np.array(game["cursors"]),
                             target_rect=rects, target_cam=cam,
                             target_spawn_t=np.array([tg["spawn_t"] for tg in targets], np.float64),
                             target_close_t=np.array([tg["close_t"] for tg in targets], np.float64),
                             meta=np.array(json.dumps(meta)))
         closed = int(np.sum(~np.isnan([tg["close_t"] for tg in targets]))) if targets else 0
         print(f"Saved {len(times)} frames of hand movement and {len(targets)} windows ({closed} closed) to data/{out.name}")
+    avg = float(np.mean(close_times)) if close_times else 0.0
     if close_times:
-        avg = float(np.mean(close_times))
         C.RUNS_DIR.mkdir(exist_ok=True)
         scores = C.RUNS_DIR / "scores.csv"
         new = not scores.exists()
@@ -358,7 +467,14 @@ def main():
             if new:
                 wr.writerow(["time", "mode", "seed", "windows", "avg_seconds"])
             wr.writerow([stamp_name, mode, args.seed, len(close_times), f"{avg:.3f}"])
-        print(f"{mode}: closed {len(close_times)} windows, average {avg:.2f} s each (saved to runs/scores.csv)")
+    run = {"player": player, "name": name, "attempt": attempt, "score": game["score"],
+           "time": round(game["time"], 2), "avg": round(avg, 3), "closed": len(close_times),
+           "windows": args.windows, "finished": game["finished"], "mode": mode, "preview": game["preview"],
+           "date": time.strftime("%Y-%m-%d %H:%M")}
+    A.add_run(run)
+    print(f"{name} attempt #{attempt}: {game['score']:,} points in {A.clock(game['time'])}"
+          + ("" if game["finished"] else "  (quit early: not on the leaderboard)"))
+    return run
 
 
 if __name__ == "__main__":

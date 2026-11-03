@@ -5,3 +5,5 @@ __pycache__/
 data/
 runs/
 models/
+data_still/
+data_final/
