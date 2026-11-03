@@ -87,6 +87,7 @@ python best_model.py                 # print the winning model
 
 The menu (bottom right) switches the color theme and the next-target preview. On macOS, allow your terminal to
 use the camera the first time. Recordings go to `data/` and player accounts to `runs/`; neither is uploaded.
+Recordings go to data/ and player accounts to runs/; neither is uploaded. The recordings behind the results table aren’t included in this repo, so to run lessons/lesson25.py or best_model.py, play some games with game.py first (and move 5 of them into data_final/ for the lockbox).
 
 ## Files
 
@@ -107,9 +108,4 @@ breakdown and glitch filter · 14-15 hand points and mixture of experts · 16-17
 
 ## How this was built
 
-I built this while learning PyTorch, with help from Claude (Anthropic's AI). Lessons 1-5 are my own, written
-step by step while learning tensors, training loops, and normalization. The game, the arcade, and the code for
-lessons 6-26 were written by Claude at my direction. I chose which questions to test, ran every experiment,
-read the results, and decided what to try next (for example, suspecting that the worst errors were small tracker
-glitches, noticing that the game measured reacting rather than planning, which led to the next-target preview,
-and asking whether the model could be strict only on fast moves).
+In addition to help project FIVES, I built this to help me learn basic ML Concepts and PyTorch with help from Claude to conduct my experiments in a a lesson style workflow. Lessons 1-5 are my own, written step by step while learning tensors, training loops, and normalization.  I chose which questions to test, ran every experiment, read the results, and decided what to try next (for example, suspecting that the worst errors were small tracker glitches, noticing that the game measured reacting rather than planning, which led to the next-target preview, and asking whether the model could be strict only on fast moves).
