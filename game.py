@@ -45,6 +45,7 @@ import numpy as np
 
 import arcade as A
 import common as C
+import fitts
 import features as F
 
 W, H = 960, 720
@@ -158,14 +159,22 @@ class PrismPointer:
 GLITCH_JUMP = 0.2     # a fingertip "teleporting" more than 20% of the picture in one frame is a tracking glitch
 
 
-def new_target(rng, last):
-    """A random window. One in three is small (precision), and it's never right next to the last one."""
-    small = rng.random() < 1 / 3
-    w, h = (34, 26) if small else (90, 66)
-    while True:
+def new_target(rng, last, hard=False):
+    """A random window. One in three is small (precision), and it's never right next to the last one.
+    hard=True (TARGETS: HARD in the menu): every target is tiny and far away, so most are 4-5.5 bits of
+    difficulty, where landing (the careful settle) takes most of the time."""
+    if hard:
+        side = rng.choice((16, 20, 26))
+        w, h, gap = side, side, 380
+    else:
+        small = rng.random() < 1 / 3
+        w, h = (34, 26) if small else (90, 66)
+        gap = 180
+    for _ in range(1000):
         x, y = rng.randint(40, W - 40 - w), rng.randint(TOP + 20, H - 40 - h)
-        if last is None or np.hypot(x - last[0], y - last[1]) > 180:
+        if last is None or np.hypot(x - last[0], y - last[1]) > gap:
             return (x, y, w, h)
+    return (x, y, w, h)
 
 
 def make_backdrop():
@@ -255,7 +264,9 @@ def main():
             if action != "play":
                 break
             attempt = players.next_attempt(player)
-            game = play(args, cam, landmarker, predictor, clock, players.name(player), attempt)
+            lead = A.lead_for(player, attempt)
+            game = play(args, cam, landmarker, predictor, clock, players.name(player), attempt,
+                        lead=lead, blind=A.lead_mode == "study")
             last_run = finish(args, game, predictor, player, players.name(player), attempt)
             if game["window_closed"]:
                 break
@@ -265,8 +276,8 @@ def main():
         landmarker.close()
 
 
-def play(args, cam, landmarker, predictor, clock, name, attempt):
-    """One game. Returns everything recorded plus the score."""
+def play(args, cam, landmarker, predictor, clock, name, attempt, lead="off", blind=False):
+    """One game. Returns everything recorded plus the score. lead = "off", "damped", "cnn" or "steady" (see leads.py)."""
     global AMBER, BLUE
     AMBER = BLUE = tuple(int(v) for v in A.ACCENT[::-1])       # the theme color, RGB -> BGR
     if predictor is not None:
@@ -286,6 +297,17 @@ def play(args, cam, landmarker, predictor, clock, name, attempt):
     lock = 0.0                                  # lock-on progress for the current target, 0..1
     last_frame = time.monotonic()
     preview = A.preview                         # show the NEXT target faintly, so you can plan your move
+    hard = A.targets == "hard"                  # tiny, far targets (menu: TARGETS)
+    leader = None                               # the cursor lead for this game (FIVES' damped speed or CNN)
+    if lead != "off":
+        import leads
+        try:
+            leader = (leads.LeadPredictor(0.04, 0.04) if lead == "damped"
+                      else leads.CNNLead(leads.STEADY_PATH if lead == "steady" else leads.CNN_PATH,
+                                         **leads.CNN_SETTINGS))
+        except Exception as err:                # e.g. no runs/deploy_cnn_1.pt yet: play without a lead
+            print(f"Lead '{lead}' not available ({err}); playing with no lead.")
+            lead = "off"
     upcoming = None                             # that next target
     close_times = []
     score, popups = 0, []                       # popups: (x, y, points, when) for the "+667" that floats up
@@ -337,6 +359,12 @@ def play(args, cam, landmarker, predictor, clock, name, attempt):
             if accel is not None:               # slow hand = precise, fast hand = pinned (like FIVES)
                 off = accel.update(pointer, stamp)
                 pointer = np.array([pointer[0] + off[0], pointer[1] + off[1]], np.float32)
+            if leader is not None:              # the lead: draw the cursor a little ahead (like FIVES)
+                if lead == "damped":
+                    off = leader.update(pointer, stamp)
+                else:
+                    off = leader.update([(float(p[0]), float(p[1])) for p in pts], stamp)
+                pointer = np.array([pointer[0] + off[0], pointer[1] + off[1]], np.float32)
         else:
             times.append(stamp)
             frames.append(np.full((21, 2), np.nan, np.float32))
@@ -346,6 +374,8 @@ def play(args, cam, landmarker, predictor, clock, name, attempt):
             last_raw, held = None, 0
             if accel is not None:
                 accel.hand_gone()               # bring your hand back: the dot is under your finger again
+            if leader is not None:
+                leader.hand_gone()
 
         cursors.append(np.array(pointer, np.float32) if pointer is not None else np.full(2, np.nan, np.float32))
         now = time.monotonic()
@@ -357,8 +387,8 @@ def play(args, cam, landmarker, predictor, clock, name, attempt):
             if hand_since is not None and now - hand_since >= COUNTDOWN:
                 started = now
         if started is not None and target is None:
-            target, spawned, lock = upcoming or new_target(rng, last_target), now, 0.0
-            upcoming = new_target(rng, target) if preview and len(close_times) + 1 < args.windows else None
+            target, spawned, lock = upcoming or new_target(rng, last_target, hard), now, 0.0
+            upcoming = new_target(rng, target, hard) if preview and len(close_times) + 1 < args.windows else None
             targets.append({"rect": target, "spawn_t": stamp, "close_t": float("nan")})
         dt = min(now - last_frame, 0.1)                 # time since the last frame (capped, in case of a hiccup)
         last_frame = now
@@ -389,7 +419,7 @@ def play(args, cam, landmarker, predictor, clock, name, attempt):
             draw_target(canvas, target, min(lock, 1.0), len(close_times) + 1)
 
         elapsed = 0.0 if started is None else now - started
-        A.draw_hud(canvas, name, attempt, score, elapsed, len(close_times), args.windows, popups, now)
+        A.draw_hud(canvas, name if blind else f"{name} · {lead}", attempt, score, elapsed, len(close_times), args.windows, popups, now)
         popups = [p for p in popups if now - p[3] < 0.7]
         if started is None:
             if hand_since is None:
@@ -425,7 +455,8 @@ def play(args, cam, landmarker, predictor, clock, name, attempt):
     finished_at = time.monotonic()
 
     return {"times": times, "frames": frames, "cursors": cursors, "targets": targets, "glitches": glitches,
-            "close_times": close_times, "score": score, "accel": accel is not None, "preview": preview,
+            "close_times": close_times, "score": score, "accel": accel is not None, "preview": preview, "hard": hard,
+            "lead": lead, "blind": blind,
             "time": 0.0 if started is None else finished_at - started,
             "finished": len(close_times) >= args.windows, "window_closed": window_closed}
 
@@ -449,7 +480,8 @@ def finish(args, game, predictor, player, name, attempt):
                 "min_scale": args.min_scale, "precise_speed": args.precise_speed, "raw": args.raw,
                 "glide": not args.no_glide, "seed": args.seed, "model": predictor is not None,
                 "player": player, "attempt": attempt, "score": game["score"], "finished": game["finished"],
-                "preview": game["preview"], "drain": DRAIN, "sticky": STICKY}
+                "preview": game["preview"], "drain": DRAIN, "sticky": STICKY, "lead": game["lead"],
+                "targets": "hard" if game["hard"] else "normal"}
         np.savez_compressed(out, t=np.array(times), pts=np.array(game["frames"]), cursor=np.array(game["cursors"]),
                             target_rect=rects, target_cam=cam,
                             target_spawn_t=np.array([tg["spawn_t"] for tg in targets], np.float64),
@@ -458,6 +490,11 @@ def finish(args, game, predictor, player, name, attempt):
         closed = int(np.sum(~np.isnan([tg["close_t"] for tg in targets]))) if targets else 0
         print(f"Saved {len(times)} frames of hand movement and {len(targets)} windows ({closed} closed) to data/{out.name}")
     avg = float(np.mean(close_times)) if close_times else 0.0
+    # Fitts' law throughput (bits per second): the standard pointing score. See fitts.py.
+    tr = fitts.trials(times, game["cursors"], [tg["rect"] for tg in targets], [tg["spawn_t"] for tg in targets],
+                      [tg["close_t"] for tg in targets], C.MARGIN, W, H, DWELL) if targets else []
+    fit = fitts.summary(tr)
+    tp = round(fit["throughput"], 2) if fit else None
     if close_times:
         C.RUNS_DIR.mkdir(exist_ok=True)
         scores = C.RUNS_DIR / "scores.csv"
@@ -469,10 +506,14 @@ def finish(args, game, predictor, player, name, attempt):
             wr.writerow([stamp_name, mode, args.seed, len(close_times), f"{avg:.3f}"])
     run = {"player": player, "name": name, "attempt": attempt, "score": game["score"],
            "time": round(game["time"], 2), "avg": round(avg, 3), "closed": len(close_times),
-           "windows": args.windows, "finished": game["finished"], "mode": mode, "preview": game["preview"],
+           "windows": args.windows, "finished": game["finished"], "mode": mode, "preview": game["preview"], "tp": tp,
+           "targets": "hard" if game["hard"] else "normal",
+           "lead": game["lead"], "blind": game["blind"], "guess": None, "revealed": False,
            "date": time.strftime("%Y-%m-%d %H:%M")}
     A.add_run(run)
     print(f"{name} attempt #{attempt}: {game['score']:,} points in {A.clock(game['time'])}"
+          + (f", throughput {tp:.2f} bits/s" if tp is not None else "")
+          + ("" if game["blind"] else f", lead: {game['lead']}")
           + ("" if game["finished"] else "  (quit early: not on the leaderboard)"))
     return run
 

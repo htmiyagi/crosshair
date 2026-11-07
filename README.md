@@ -5,7 +5,7 @@
 Crosshair is an experiment in predicting where a fingertip will be 60 ms in the future, so a
 hand-tracking cursor feels like it keeps up with your hand instead of trailing behind it.
 
-It's the research side of [FIVES](https://github.com/yagiht/fives), a webcam hand-tracking interface
+It's the research side of [FIVES](https://github.com/htmiyagi/fives), a webcam hand-tracking interface
 that replaces the mouse with gestures. FIVES tracks the hand at ~28 fps with ~21 ms of processing, so the
 cursor always shows where the finger *was*. A prediction model is one way to close that gap.
 
@@ -74,7 +74,7 @@ Applied to FIVES: the damped-velocity "lead" from these baselines is already shi
 Needs Python **3.12** (MediaPipe doesn't support 3.13 yet) and a webcam. Tested on macOS.
 
 ```bash
-git clone https://github.com/yagiht/crosshair.git
+git clone https://github.com/htmiyagi/crosshair.git
 cd crosshair
 python3.12 -m venv .venv
 source .venv/bin/activate

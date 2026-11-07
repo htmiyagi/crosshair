@@ -45,6 +45,12 @@ SETTINGS_FILE = C.RUNS_DIR / "settings.json"
 ACCENT = GOOD = BAD = None
 theme = None
 preview = True        # show the next target faintly (switch in the menu, bottom right)
+# Cursor lead (switch in the menu): "off", "damped", "cnn", "steady" (the CNN trained not to shake), or "study". STUDY picks one for each game in a rotating,
+# per-player order and only reveals it on the results screen: a blind comparison for Fitts' law (lesson 28).
+LEAD_MODES = ["study", "off", "damped", "cnn", "steady"]
+CONDITIONS = ["off", "cnn", "steady"]      # what STUDY rotates (round 2: does training out the jitter help?)
+lead_mode = "study"
+targets = "normal"    # "normal" or "hard" (tiny, far targets: tests landing). Switch in the menu.
 
 
 def set_theme(name):
@@ -55,19 +61,42 @@ def set_theme(name):
 
 
 def load_theme():
-    global preview
+    global preview, lead_mode, targets
     settings = _load_early(SETTINGS_FILE)
     set_theme(settings.get("theme", "red"))
     preview = settings.get("preview", True)
+    lead_mode = settings.get("lead", "study") if settings.get("lead", "study") in LEAD_MODES else "study"
+    targets = "hard" if settings.get("targets") == "hard" else "normal"
 
 
 def _save_settings():
-    _save(SETTINGS_FILE, {"theme": theme, "preview": preview})
+    _save(SETTINGS_FILE, {"theme": theme, "preview": preview, "lead": lead_mode, "targets": targets})
+
+
+def next_lead():
+    global lead_mode
+    lead_mode = LEAD_MODES[(LEAD_MODES.index(lead_mode) + 1) % len(LEAD_MODES)]
+    _save_settings()
+
+
+def lead_for(player, attempt):
+    """Which lead this game uses. In STUDY mode: rotate off -> cnn -> steady, each player starting at a different
+    point (so no condition always gets the 'fresh' or the 'practiced' games: counterbalancing)."""
+    if lead_mode != "study":
+        return lead_mode
+    start = sum(map(ord, player)) % len(CONDITIONS)
+    return CONDITIONS[(start + attempt) % len(CONDITIONS)]
 
 
 def next_theme():
     names = list(THEMES)
     set_theme(names[(names.index(theme) + 1) % len(names)])
+    _save_settings()
+
+
+def toggle_targets():
+    global targets
+    targets = "normal" if targets == "hard" else "hard"
     _save_settings()
 
 
@@ -171,6 +200,15 @@ def add_run(run):
 
 def all_runs():
     return _load(BOARD_FILE, [])
+
+
+def update_run(player, attempt, **fields):
+    """Change one saved game (found by player + attempt), e.g. to store a guess or whether it's revealed."""
+    runs = all_runs()
+    for r in runs:
+        if r.get("player") == player and r.get("attempt") == attempt:
+            r.update(fields)
+    _save(BOARD_FILE, runs)
 
 
 def ranked(runs, best_only):
@@ -376,7 +414,7 @@ def draw_big_message(canvas_bgr, big, small=""):
 class Menu:
     """All the screens between games. menu.run() returns ("play", player_key) or ("quit", None)."""
 
-    TABS = [("play", "PLAY"), ("board", "LEADERBOARD"), ("profile", "PROFILE")]
+    TABS = [("play", "PLAY"), ("board", "LEADERBOARD"), ("profile", "PROFILE"), ("study", "STUDY LOG")]
 
     def __init__(self, win, w, h, players, windows):
         self.win, self.w, self.h = win, w, h
@@ -409,7 +447,9 @@ class Menu:
         c.text((40, self.h - 14), "SYS ONLINE · HAND TRACKING READY", "mono", 10, MUTED, "ls")
         x = self.w - 40
         for label, action in ((f"THEME: {theme.upper()}  >", "theme"),
-                              (f"NEXT-TARGET PREVIEW: {'ON' if preview else 'OFF'}  >", "preview")):
+                              (f"PREVIEW: {'ON' if preview else 'OFF'}  >", "preview"),
+                              (f"LEAD: {lead_mode.upper()}  >", "lead"),
+                              (f"TARGETS: {targets.upper()}  >", "targets")):
             tw = c.width(label, "mono", 10)
             c.text((x, self.h - 14), label, "mono", 10, ACCENT, "rs")
             c.buttons.append((x - tw - 4, self.h - 30, x + 4, self.h - 6, action))
@@ -425,7 +465,7 @@ class Menu:
 
         x = 40
         for key, label in self.TABS:
-            if key == "profile" and not self.me:
+            if key in ("profile", "study") and not self.me:
                 continue
             on = self.tab == key or (key == "play" and self.tab == "results")
             shown = f"[ {label} ]" if on else f"  {label}  "
@@ -438,7 +478,7 @@ class Menu:
         c.d.line((40, 176, self.w - 40, 176), fill=LINE, width=2)
 
         {"play": self.draw_play, "board": self.draw_board, "profile": self.draw_profile,
-         "results": self.draw_results}[self.tab](c)
+         "results": self.draw_results, "study": self.draw_study}[self.tab](c)
         return c
 
     def draw_play(self, c):
@@ -481,7 +521,8 @@ class Menu:
         c.text((bx + 16, y0 + 139), "or press Enter", "body", 14, MUTED, "lm")
         lines = ["Point with your index finger. Hold the reticle on a target until the lock-on ring fills.",
                  f"Faster locks score more. Small targets are worth {SMALL_BONUS:g}x.",
-                 "The timer starts after the 3-2-1 countdown.",
+                 "The timer starts after the 3-2-1 countdown."
+                 + ("  Lead: STUDY (a hidden condition each game)." if lead_mode == "study" else f"  Lead: {lead_mode.upper()}."),
                  "q quits a game early (it still records your hand, but doesn't go on the leaderboard)."]
         for i, s in enumerate(lines):
             c.text((x0 + 24, y0 + 200 + 28 * i), s, "body", 15, MUTED)
@@ -503,7 +544,7 @@ class Menu:
         for x, label, a in cols:
             c.text((x, hy), label, "mono", 11, MUTED, a)
         c.d.line((x0 + 24, hy + 20, x1 - 24, hy + 20), fill=LINE, width=2)
-        c.text((x0 + 24, self.h - 64), "P = played with next-target preview on (easier: you can plan your move)",
+        c.text((x0 + 24, self.h - 64), "P = preview on  ·  H = hard targets  ·  lead: O = off, D = damped, C = CNN, T = steady CNN, S = study (hidden)",
                "mono", 10, MUTED)
         y = hy + 28
         for i, r in enumerate(rows):
@@ -511,7 +552,9 @@ class Menu:
                 c.d.rectangle((x0 + 20, y - 2, x1 - 20, y + 30), fill=SOFT)
             c.text((x0 + 24, y + 14), str(i + 1), "display", 24, ACCENT if i == 0 else INK, "lm")
             c.text((x0 + 80, y + 14), r["name"], "body", 16, INK, "lm")
-            c.text((x0 + 380, y + 14), f"#{r['attempt']}" + (" P" if r.get("preview") else ""), "mono", 15, MUTED, "rm")
+            tag = (" P" if r.get("preview") else "") + (" H" if r.get("targets") == "hard" else "") + (" S" if r.get("blind") else
+                   {"off": " O", "damped": " D", "cnn": " C", "steady": " T"}.get(r.get("lead"), ""))
+            c.text((x0 + 380, y + 14), f"#{r['attempt']}{tag}", "mono", 15, MUTED, "rm")
             c.text((x0 + 560, y + 14), f"{r['score']:,}", "display", 24, INK, "rm")
             c.text((x0 + 700, y + 14), clock(r["time"]), "mono", 15, INK, "rm")
             c.text((x1 - 24, y + 14), f"{r['avg']:.2f} s", "mono", 15, MUTED, "rm")
@@ -527,7 +570,8 @@ class Menu:
         stats = [("ATTEMPTS", str(self.players.attempts(self.me))),
                  ("BEST SCORE", f"{max(r['score'] for r in done):,}" if done else "–"),
                  ("BEST TIME", clock(min(r["time"] for r in done)) if done else "–"),
-                 ("LAST 5 AVG", f"{int(np.mean([r['score'] for r in done[-5:]])):,}" if done else "–")]
+                 ("BEST THROUGHPUT", (f"{max(r['tp'] for r in done if r.get('tp')):.2f} bits/s"
+                                      if any(r.get("tp") for r in done) else "–"))]
         for i, (label, value) in enumerate(stats):
             x = x0 + 24 + i * 210
             c.text((x, y0 + 84), label, "mono", 11, MUTED)
@@ -553,7 +597,8 @@ class Menu:
         c.text((x0 + 24, y0 + 22), f"ATTEMPT #{r['attempt']} · {r['name'].upper()}", "mono", 13, MUTED)
         c.text((x0 + 24, y0 + 44), f"{r['score']:,}", "display", 110, ACCENT if r.get("finished") else INK)
         c.text((x0 + 26, y0 + 172), f"TIME {clock(r['time'])}   ·   {r['avg']:.2f} s PER TARGET   ·   "
-               f"{r['closed']}/{r['windows']} TARGETS", "mono", 14, INK)
+               f"{r['closed']}/{r['windows']} TARGETS"
+               + (f"   ·   {r['tp']:.2f} BITS/S" if r.get("tp") is not None else ""), "mono", 14, INK)
         if r.get("finished"):
             board = ranked(all_runs(), best_only=False)
             rank = next((i + 1 for i, b in enumerate(board) if b == r), None)
@@ -564,11 +609,71 @@ class Menu:
             c.text((x0 + 24, y0 + 214), msg, "display", 28, color)
         else:
             c.text((x0 + 24, y0 + 214), "ABORTED · NOT ON THE LEADERBOARD", "display", 28, BAD)
-        bx = c.button(x0 + 24, y0 + 280, "PLAY AGAIN", "play", primary=True, size=20, pad=24) + 10
-        bx = c.button(bx, y0 + 280, "Leaderboard", "tab:board", size=16, pad=18) + 10
-        c.button(bx, y0 + 280, "Switch player", "logout", size=16, pad=18)
+        if r.get("lead") and not r.get("blind"):
+            c.text((x0 + 24, y0 + 252), f"CURSOR LEAD THIS ROUND: {r['lead'].upper()}", "mono", 12, MUTED)
+        elif r.get("blind"):
+            gy = y0 + 256
+            if r.get("guess") is None:                  # ask BEFORE anything is revealed
+                c.text((x0 + 24, gy), "STUDY ROUND: WHICH CURSOR LEAD DO YOU THINK THAT WAS?", "mono", 12, ACCENT)
+                bx = x0 + 24
+                for g in CONDITIONS + ["not sure"]:
+                    bx = c.button(bx, gy + 18, g.upper(), "guess:" + g, size=13, pad=12) + 8
+            else:
+                c.text((x0 + 24, gy), f"YOUR GUESS: {r['guess'].upper()}", "mono", 12, MUTED)
+                if r.get("revealed"):
+                    right = r["guess"] == r["lead"]
+                    c.text((x0 + 220, gy), f"ACTUAL: {r['lead'].upper()}  ({'right' if right else 'wrong'})",
+                           "mono", 12, GOOD if right else BAD)
+                    c.button(x0 + 24, gy + 18, "Hide it again", f"reveal:{r['attempt']}", size=13, pad=12)
+                else:
+                    bx = c.button(x0 + 24, gy + 18, "Reveal", f"reveal:{r['attempt']}", size=13, pad=12) + 10
+                    c.text((bx, gy + 32), "or keep it hidden (you can reveal any game later in the STUDY LOG)",
+                           "mono", 11, MUTED, "lm")
+        by = y0 + 330 if r.get("blind") else y0 + 280
+        bx = c.button(x0 + 24, by, "PLAY AGAIN", "play", primary=True, size=20, pad=24) + 10
+        bx = c.button(bx, by, "Leaderboard", "tab:board", size=16, pad=18) + 10
+        c.button(bx, by, "Switch player", "logout", size=16, pad=18)
         c.text((x0 + 24, self.h - 70), "Enter = play again · Esc = quit · your hand movement was saved to data/ for training",
                "mono", 12, MUTED)
+
+    def draw_study(self, c):
+        """Every STUDY game: your guess, and a show/hide toggle for the real lead, one game at a time."""
+        x0, y0, x1 = 40, 200, self.w - 40
+        c.panel(x0, y0, x1, self.h - 40)
+        c.text((x0 + 24, y0 + 22), "STUDY LOG", "display", 32, INK)
+        mine = [r for r in all_runs() if r.get("player") == self.me and r.get("blind")]
+        guessed = [r for r in mine if r.get("guess") not in (None, "not sure")]
+        shown = [r for r in guessed if r.get("revealed")]
+        right = sum(r["guess"] == r["lead"] for r in shown)
+        c.text((x0 + 24, y0 + 66), f"{len(mine)} study games  ·  {len(guessed)} guesses  ·  "
+               + (f"{right} of {len(shown)} revealed guesses right (chance would be about 1 in 3)" if shown
+                  else "none revealed yet"), "body", 14, MUTED)
+        if not mine:
+            c.text((x0 + 24, y0 + 110), "No study games yet. Set LEAD: STUDY (bottom right) and play.", "body", 15, MUTED)
+            return
+        cols = [(x0 + 24, "GAME", "la"), (x0 + 120, "DATE", "la"), (x0 + 330, "SCORE", "ra"), (x0 + 450, "BITS/S", "ra"),
+                (x0 + 500, "YOUR GUESS", "la"), (x0 + 650, "ACTUAL LEAD", "la")]
+        hy = y0 + 100
+        for x, label, an in cols:
+            c.text((x, hy), label, "mono", 11, MUTED, an)
+        c.d.line((x0 + 24, hy + 20, x1 - 24, hy + 20), fill=LINE, width=2)
+        y = hy + 28
+        for r in list(reversed(mine))[:11]:
+            c.text((x0 + 24, y + 14), f"#{r['attempt']}", "mono", 14, INK, "lm")
+            c.text((x0 + 120, y + 14), r.get("date", ""), "mono", 12, MUTED, "lm")
+            c.text((x0 + 330, y + 14), f"{r['score']:,}", "body", 15, INK, "rm")
+            c.text((x0 + 450, y + 14), f"{r['tp']:.2f}" if r.get("tp") else "-", "mono", 14, INK, "rm")
+            c.text((x0 + 500, y + 14), (r.get("guess") or "-").upper(), "mono", 13, INK, "lm")
+            if r.get("revealed"):
+                ok = r.get("guess") == r["lead"]
+                col = GOOD if ok else (BAD if r.get("guess") not in (None, "not sure") else INK)
+                c.text((x0 + 650, y + 14), r["lead"].upper(), "mono", 13, col, "lm")
+                c.button(x1 - 90, y + 2, "hide", f"reveal:{r['attempt']}", size=11, pad=10)
+            else:
+                c.text((x0 + 650, y + 14), "hidden", "mono", 13, MUTED, "lm")
+                c.button(x1 - 90, y + 2, "show", f"reveal:{r['attempt']}", size=11, pad=10)
+            c.d.line((x0 + 24, y + 31, x1 - 24, y + 31), fill=LINE)
+            y += 34
 
     # ---------- actions
     def do(self, action):
@@ -581,6 +686,21 @@ class Menu:
             next_theme()
         elif kind == "preview":
             toggle_preview()
+        elif kind == "lead":
+            next_lead()
+        elif kind == "targets":
+            toggle_targets()
+        elif kind == "guess" and self.last_run is not None:
+            update_run(self.last_run["player"], self.last_run["attempt"], guess=arg)
+            self.last_run["guess"] = arg
+        elif kind == "reveal":
+            attempt = int(arg)
+            run = next((r for r in all_runs() if r.get("player") == self.me and r.get("attempt") == attempt), None)
+            if run is not None:
+                flip = not run.get("revealed", False)                     # toggle: reveal / hide again
+                update_run(self.me, attempt, revealed=flip)
+                if self.last_run is not None and self.last_run.get("attempt") == attempt:
+                    self.last_run["revealed"] = flip
         elif kind == "tab":
             self.tab = arg
         elif kind == "best":
