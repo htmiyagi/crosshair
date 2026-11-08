@@ -67,7 +67,33 @@ The model took two days of experiments (`lessons/`). The path mattered more than
   went from tied with damped velocity to 15% better (lessons 22-25).
 - **More data still helps.** The learning curve is still dropping at 27 training games (lesson 26).
 
-Applied to FIVES: the damped-velocity "lead" from these baselines is already shipped there, and you can feel the lag drop.
+### Does it actually help a person point? (lessons 27-30)
+
+- **Fitts' law holds for a webcam cursor.** Movement time grows with target difficulty exactly as the classic model
+  predicts: R² 0.98 on binned data, about 3.5 bits/s throughput (lesson 28).
+- **A blind study.** The game rotates the cursor lead (off / damped / CNN) without telling the player, then asks them
+  to guess. Over 30 games (one player, so far): the CNN lead was **21% faster than no lead** (5.00 vs 4.14 bits/s),
+  still ahead after removing the practice trend, and ahead on hard (tiny, far) targets too. Damped helped less (+10%).
+  The player guessed the lead right 92% of the time, so the difference is felt, not just measured.
+- **Fast but shaky.** The CNN also had about 2× the jitter while settling on a target. It predicts braking well, but
+  it reads raw tracking points, so their wobble came through.
+- **Teaching it not to shake.** Adding a jitter penalty to the training loss (loss = error + λ × jitter) beat simply
+  smoothing the CNN's output at every level of steadiness; at λ 0.3 the predicted path shakes no more than the real
+  fingertip (lesson 29). Early study games suggest it keeps the speed with much less jitter; more games coming.
+- **Phantom clicks, found in old data.** Replaying 77 games (where nobody ever clicked) through FIVES's click code
+  showed 4.2 phantom clicks per minute. They weren't from fast moves: they happened when the hand curled tighter than
+  the usual pointing pose (lesson 30).
+
+### Side quest: writing in the air (lessons 31-34)
+
+- A 1D CNN reads pen-written letters from their strokes with 10% error on writers it never saw (the dataset's
+  authors: 8.47%). Apple Vision, tested on the same letters, almost never answers for a lone letter, but is nearly
+  always right when it does (lessons 31-32).
+- From the webcam alone: "pen on the paper" vs "lifted" from hand size (96-98%), and a pen grip vs a pointing hand
+  from hand shape (96%; the giveaway is the index and middle fingertips held together). Writing with it didn't feel
+  good yet, so it's parked (lessons 33-34).
+
+Applied to FIVES: the CNN lead ships there (and STEADY, the jitter-trained one), switchable with `l`.
 
 ## Play it (one line, for anyone)
 
@@ -106,8 +132,13 @@ Recordings go to data/ and player accounts to runs/; neither is uploaded. The re
 
 | File | What it does |
 |---|---|
-| `game.py` | the data-collection game: targets, scope-style cursor, score, timer |
-| `arcade.py` | menus, player accounts (passcodes stored scrambled), leaderboard, themes |
+| `install.sh` | the one-line installer (uv for Python, no Homebrew) and the Desktop icon |
+| `game.py` | the data-collection game: targets, scope-style cursor, score, timer; a blind STUDY mode and HARD targets |
+| `arcade.py` | menus, player accounts (passcodes stored scrambled), leaderboard, study log, themes |
+| `share.py` | SEND GAMES: uploads a player's games (hand positions only) to Hoyu's Google Drive, after asking |
+| `leads.py`, `lead_model/` | the cursor leads used in the game (damped, CNN, STEADY) and their trained models |
+| `fitts.py` | Fitts' law: difficulty, movement time, throughput, settle jitter |
+| `depth_rec.py` | recorder for the air-writing tests (pen on paper / lifted / relaxed / pointing) |
 | `best_model.py` | the winning model and its training recipe, on its own |
 | `common.py` | camera, MediaPipe setup, shared settings |
 | `features.py`, `model.py`, `train.py` | the original training pipeline (used by `game.py --model`) |
@@ -117,7 +148,9 @@ Recordings go to data/ and player accounts to runs/; neither is uploaded. The re
 **Lessons:** 1-5 PyTorch basics · 6-9 cross-validation, overfitting, baselines · 10 noise floor · 11-13 error
 breakdown and glitch filter · 14-15 hand points and mixture of experts · 16-17 CNNs · 18 transformer and attention ·
 19 learning curve and mirroring · 20-21 inputs and loss functions · 22-24 debugging training · 25 final comparison ·
-26 learning curve for the final model.
+26 learning curve for the final model · 27 the deployed models · 28 Fitts' law and the blind study ·
+29 jitter penalty vs smoothing · 30 phantom clicks · 31-32 letter recognition and Apple Vision ·
+33-34 pen on paper, pen grip.
 
 ## How this was built
 
