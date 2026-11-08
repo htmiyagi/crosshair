@@ -288,6 +288,7 @@ def play(args, cam, landmarker, predictor, clock, name, attempt, lead="off", bli
     glitches = held = 0
     rng = random.Random(args.seed)
     times, frames, cursors = [], [], []         # the recording (hand points + where the dot was)
+    depths = []                                 # MediaPipe's z (depth guess) for each of the 21 points, per frame
     targets = []                                # every window: rect, when it appeared, when it closed
     shown = None                                # where the dot was last drawn (window pixels), for gliding
     GLIDE_STEPS = 3                             # in-between pictures per camera frame
@@ -333,6 +334,7 @@ def play(args, cam, landmarker, predictor, clock, name, attempt, lead="off", bli
             pts = np.array([(lm.x, lm.y) for lm in result.hand_landmarks[0]], np.float32)
             times.append(stamp)
             frames.append(pts)
+            depths.append(np.array([lm.z for lm in result.hand_landmarks[0]], np.float32))
             sig = F.signal(pts[None])[0]
             if recent and stamp - recent[-1][0] > F.MAX_GAP:
                 recent.clear()
@@ -368,6 +370,7 @@ def play(args, cam, landmarker, predictor, clock, name, attempt, lead="off", bli
         else:
             times.append(stamp)
             frames.append(np.full((21, 2), np.nan, np.float32))
+            depths.append(np.full(21, np.nan, np.float32))
             recent.clear()
             if smoother is not None:
                 smoother.reset()                # hand lost: start fresh when it comes back
@@ -454,7 +457,7 @@ def play(args, cam, landmarker, predictor, clock, name, attempt, lead="off", bli
             break
     finished_at = time.monotonic()
 
-    return {"times": times, "frames": frames, "cursors": cursors, "targets": targets, "glitches": glitches,
+    return {"times": times, "frames": frames, "depths": depths, "cursors": cursors, "targets": targets, "glitches": glitches,
             "close_times": close_times, "score": score, "accel": accel is not None, "preview": preview, "hard": hard,
             "lead": lead, "blind": blind,
             "time": 0.0 if started is None else finished_at - started,
@@ -482,7 +485,8 @@ def finish(args, game, predictor, player, name, attempt):
                 "player": player, "attempt": attempt, "score": game["score"], "finished": game["finished"],
                 "preview": game["preview"], "drain": DRAIN, "sticky": STICKY, "lead": game["lead"],
                 "targets": "hard" if game["hard"] else "normal"}
-        np.savez_compressed(out, t=np.array(times), pts=np.array(game["frames"]), cursor=np.array(game["cursors"]),
+        np.savez_compressed(out, t=np.array(times), pts=np.array(game["frames"]),
+                            z=np.array(game["depths"]), cursor=np.array(game["cursors"]),
                             target_rect=rects, target_cam=cam,
                             target_spawn_t=np.array([tg["spawn_t"] for tg in targets], np.float64),
                             target_close_t=np.array([tg["close_t"] for tg in targets], np.float64),

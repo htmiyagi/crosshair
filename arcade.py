@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import secrets
+import threading
 import time
 
 import cv2
@@ -428,6 +429,8 @@ class Menu:
         self.fields = {"code": "", "new_name": "", "new_code": ""}
         self.focus = None
         self.err = ""
+        self.note = ""                      # a short message at the bottom-left (e.g. sending games)
+        self.sending = False
         self.clicks = []
         load_theme()
         cv2.setMouseCallback(win, self._mouse)
@@ -444,9 +447,11 @@ class Menu:
         c.text((114 + c.width("CROSS", "display", 64), 26), "HAIR", "display", 64, ACCENT)
         c.text((116, 104), f"// TARGET ACQUISITION TRAINER · {self.windows} TARGETS · HIGHEST SCORE WINS",
                "mono", 11, MUTED)
-        c.text((40, self.h - 14), "SYS ONLINE · HAND TRACKING READY", "mono", 10, MUTED, "ls")
+        c.text((40, self.h - 14), self.note.upper() if self.note else "SYS ONLINE · HAND TRACKING READY", "mono", 10,
+               ACCENT if self.note else MUTED, "ls")
         x = self.w - 40
-        for label, action in ((f"THEME: {theme.upper()}  >", "theme"),
+        share_item = (("SENDING...  " if self.sending else "SEND GAMES TO HOYU  >", "send"),) if self.me else ()
+        for label, action in share_item + ((f"THEME: {theme.upper()}  >", "theme"),
                               (f"PREVIEW: {'ON' if preview else 'OFF'}  >", "preview"),
                               (f"LEAD: {lead_mode.upper()}  >", "lead"),
                               (f"TARGETS: {targets.upper()}  >", "targets")):
@@ -690,6 +695,8 @@ class Menu:
             next_lead()
         elif kind == "targets":
             toggle_targets()
+        elif kind == "send" and self.me and not self.sending:
+            self.start_sending()
         elif kind == "guess" and self.last_run is not None:
             update_run(self.last_run["player"], self.last_run["attempt"], guess=arg)
             self.last_run["guess"] = arg
@@ -729,6 +736,20 @@ class Menu:
         elif kind == "play" and self.me:
             return ("play", self.me)
         return None
+
+    def start_sending(self):
+        """SEND GAMES: asks first (a normal Mac box), then uploads in the background (see share.py)."""
+        import share
+        me, name = self.me, self.players.name(self.me)
+        self.sending, self.note = True, "Asking..."
+
+        def job():
+            try:
+                self.note = share.send(me, name, progress=lambda m: setattr(self, "note", m))
+            except Exception as err:
+                self.note = f"Couldn't send: {err}"
+            self.sending = False
+        threading.Thread(target=job, daemon=True).start()
 
     def key(self, k):
         """Keyboard. Returns an action to run, or None."""

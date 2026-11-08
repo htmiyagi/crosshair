@@ -9,9 +9,9 @@ It's the research side of [FIVES](https://github.com/htmiyagi/fives), a webcam h
 that replaces the mouse with gestures. FIVES tracks the hand at ~28 fps with ~21 ms of processing, so the
 cursor always shows where the finger *was*. A prediction model is one way to close that gap.
 
-> **Status:** a small CNN beats a damped-velocity baseline by **15%**, winning all 6 cross-validation folds
-> and a held-out test set. It isn't in FIVES yet: FIVES ships the simpler damped-velocity "lead" for now,
-> and the CNN goes in once there's more (and more varied) training data, since it's still improving as data grows.
+> **Status:** a small CNN beats a damped-velocity baseline by **15%** on held-out games, and it's now the cursor
+> lead in FIVES. In a blind study (lessons 28-29) it made pointing **21% faster** than no lead; a version trained with a
+> jitter penalty ("STEADY") looks like it keeps that speed with much less shake (early: only a few games so far). Next: more players (see "Play it" below).
 
 ## How it works
 
@@ -69,7 +69,20 @@ The model took two days of experiments (`lessons/`). The path mattered more than
 
 Applied to FIVES: the damped-velocity "lead" from these baselines is already shipped there, and you can feel the lag drop.
 
-## Run it
+## Play it (one line, for anyone)
+
+Open Terminal, paste this, press Enter:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/htmiyagi/crosshair/main/install.sh | bash
+```
+
+A window asks **Install Crosshair?** After about 5 minutes there's a **Crosshair** icon on your Desktop: double-click it
+to play. The first time, macOS asks to use the camera (click Allow, then quit Terminal with Cmd + Q and open it again).
+New players are in the blind study automatically. When you're done, click **SEND GAMES TO HOYU** (bottom right of the
+menu): it asks first, then uploads your games (hand positions only, no camera images) for the research.
+
+## Run it (development)
 
 Needs Python **3.12** (MediaPipe doesn't support 3.13 yet) and a webcam. Tested on macOS.
 

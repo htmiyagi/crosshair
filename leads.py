@@ -14,8 +14,18 @@ from collections import deque
 import torch
 from torch import nn
 
-CNN_PATH = "runs/deploy_cnn_1.pt"     # the 1-frame-ahead ensemble from lesson 27
-STEADY_PATH = "runs/steady_cnn_0.3.pt"   # lesson 29: the jitter-penalty CNN (lambda 0.3); try 0.1 by changing this
+def _model(name):
+    """The shipped copy in lead_model/ (on GitHub, so friends have it), or your fresh one in runs/."""
+    from pathlib import Path
+    here = Path(__file__).resolve().parent
+    for folder in ("lead_model", "runs"):
+        if (here / folder / name).exists():
+            return str(here / folder / name)
+    return str(here / "lead_model" / name)
+
+
+CNN_PATH = _model("deploy_cnn_1.pt")       # the 1-frame-ahead ensemble from lesson 27
+STEADY_PATH = _model("steady_cnn_0.3.pt")  # lesson 29: the jitter-penalty CNN (lambda 0.3)
 CNN_SETTINGS = {"scale": 1.0, "most": 0.04, "still": 0.04, "full": 0.07, "calm": 1.0}   # what you tuned in FIVES
 
 
