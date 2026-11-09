@@ -36,9 +36,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))     # so "import
 import fitts                                                          # noqa: E402
 
 files = sorted(glob.glob("data/*.npz")) + sorted(glob.glob("data_final/*.npz"))
-shared = sorted(glob.glob("data_shared/**/*.npz", recursive=True))   # friends' games (SEND GAMES, via Google Drive)
-have = {Path(f).name for f in files}
-shared = [f for f in shared if Path(f).name not in have]           # your own sent games are already in data/
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import friends                                                      # friends' games: unzipped game by game
+shared = friends.games(skip={Path(f).name for f in files})          # (your own sent games are already in data/)
 files += shared
 games = []
 for f in files:
@@ -149,8 +150,10 @@ else:
 # ---- can you FEEL the difference? (guesses made on the results screen of study games) ----
 board = json.loads(Path("runs/leaderboard.json").read_text()) if Path("runs/leaderboard.json").exists() else []
 seen = {(r.get("player"), r.get("attempt")) for r in board}
-for f in glob.glob("data_shared/**/board_*.json", recursive=True):    # friends' guesses
-    board += [r for r in json.loads(Path(f).read_text()) if (r.get("player"), r.get("attempt")) not in seen]
+for r in friends.boards():                                          # friends' guesses
+    if (r.get("player"), r.get("attempt")) not in seen:
+        seen.add((r.get("player"), r.get("attempt")))
+        board.append(r)
 guesses = [r for r in board if r.get("blind") and r.get("guess") in CONDS]
 if guesses:
     right = sum(r["guess"] == r["lead"] for r in guesses)
