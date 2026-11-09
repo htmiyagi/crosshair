@@ -447,8 +447,11 @@ class Menu:
         c.text((114 + c.width("CROSS", "display", 64), 26), "HAIR", "display", 64, ACCENT)
         c.text((116, 104), f"// TARGET ACQUISITION TRAINER · {self.windows} TARGETS · HIGHEST SCORE WINS",
                "mono", 11, MUTED)
-        c.text((40, self.h - 14), self.note.upper() if self.note else "SYS ONLINE · HAND TRACKING READY", "mono", 10,
-               ACCENT if self.note else MUTED, "ls")
+        note = self.note.upper()
+        if len(note) > 56:                          # keep it clear of the buttons on the right
+            note = note[:54] + "..."
+        c.text((40, self.h - 14), note if note else "SYS ONLINE · HAND TRACKING READY", "mono", 10,
+               ACCENT if note else MUTED, "ls")
         x = self.w - 40
         share_item = (("SENDING...  " if self.sending else "SEND GAMES TO HOYU  >", "send"),) if self.me else ()
         for label, action in share_item + ((f"THEME: {theme.upper()}  >", "theme"),
@@ -746,6 +749,7 @@ class Menu:
         def job():
             try:
                 self.note = share.send(me, name, progress=lambda m: setattr(self, "note", m))
+                print("SEND GAMES:", self.note)            # the full message, in Terminal
             except Exception as err:
                 self.note = f"Couldn't send: {err}"
             self.sending = False
